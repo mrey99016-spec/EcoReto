@@ -1,38 +1,46 @@
+from flask import Blueprint, render_template, request, redirect, url_for, session, flash
+from werkzeug.security import generate_password_hash, check_password_hash
 import os
 import sqlite3
-from flask import Blueprint, render_template, request, redirect, url_for, flash, session, current_app, g
-from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import date
 
-bp = Blueprint('rutas', __name__)
+bp = Blueprint('bp', __name__)
 
-def get_conn():
+def get_db():
     db_url = os.environ.get('DATABASE_URL')
     if db_url:
         import psycopg2
         conn = psycopg2.connect(db_url)
-        conn.autocommit = False
-        return conn, True  # True = es postgres
-    else:
-        conn = sqlite3.connect('app/eco_reto.db')
-        conn.row_factory = sqlite3.Row
-        return conn, False
+        return conn, True
+    conn = sqlite3.connect('app/eco_reto.db')
+    conn.row_factory = sqlite3.Row
+    return conn, False
 
-def qmark_to_psycopg(query, is_pg):
+def q(query, is_pg):
+    return query.replace('?', '%s') if is_pg else query
+
+def init_tables():
+    conn, is_pg = get_db()
+    cur = conn.cursor()
     if is_pg:
-        return query.replace('?', '%s')
-    return query
+        cur.execute("CREATE TABLE IF NOT EXISTS usuarios (id SERIAL PRIMARY KEY, usuario TEXT UNIQUE NOT NULL, contrasena TEXT NOT NULL)")
+        cur.execute("CREATE TABLE IF NOT EXISTS acciones (id SERIAL PRIMARY KEY, titulo TEXT NOT NULL, tipo TEXT NOT NULL, descripcion TEXT NOT NULL, fecha DATE NOT NULL, impacto TEXT NOT NULL, unidad TEXT NOT NULL, usuario_id INTEGER)")
+    else:
+        cur.execute("CREATE TABLE IF NOT EXISTS usuarios (id INTEGER PRIMARY KEY AUTOINCREMENT, usuario TEXT UNIQUE NOT NULL, contrasena TEXT NOT NULL)")
+        cur.execute("CREATE TABLE IF NOT EXISTS acciones (id INTEGER PRIMARY KEY AUTOINCREMENT, titulo TEXT NOT NULL, tipo TEXT NOT NULL, descripcion TEXT NOT NULL, fecha DATE NOT NULL, impacto TEXT NOT NULL, unidad TEXT NOT NULL, usuario_id INTEGER)")
+    conn.commit()
+    cur.close()
+    conn.close()
+
+init_tables()
 
 @bp.route('/')
 def index():
     if 'usuario_id' not in session:
-        return redirect(url_for('rutas.login'))
-    conn, is_pg = get_conn()
+        return redirect(url_for('bp.login'))
+    conn, is_pg = get_db()
     cur = conn.cursor()
-    if is_pg:
-        cur.execute("SELECT * FROM acciones WHERE usuario_id = %s ORDER BY fecha DESC", (session['usuario_id'],))
-    else:
-        cur.execute("SELECT * FROM acciones WHERE usuario_id = ? ORDER BY fecha DESC", (session['usuario_id'],))
+    cur.execute(q("SELECT * FROM acciones WHERE usuario_id = ? ORDER BY fecha DESC", is_pg), (session['usuario_id'],))
     acciones = cur.fetchall()
     cur.close()
     conn.close()
@@ -41,40 +49,35 @@ def index():
 @bp.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
-        usuario = request.form.get('usuario', '').strip()
-        contrasena = request.form.get('contrasena', '').strip()
-        conn, is_pg = get_conn()
+        usuario = request.form['usuario']
+        contrasena = request.form['contrasena']
+        conn, is_pg = get_db()
         cur = conn.cursor()
-        cur.execute(qmark_to_psycopg("SELECT * FROM usuarios WHERE usuario = ?", is_pg), (usuario,))
-        user = cur.fetchone()
+        cur.execute(q("SELECT * FROM usuarios WHERE usuario = ?", is_pg), (usuario,))
+        u = cur.fetchone()
         cur.close()
         conn.close()
-        if user and check_password_hash(user[2] if not is_pg else user[2], contrasena):
-            session['usuario_id'] = user[0] if not is_pg else user[0]
-            session['usuario'] = usuario
-            return redirect(url_for('rutas.index'))
-        flash('Usuario o contraseña incorrectos', 'error')
+        if u and check_password_hash(u[2], contrasena):
+            session['usuario_id'] = u[0]
+            session['usuario'] = u[1]
+            return redirect(url_for('bp.index'))
+        flash('Usuario o contraseña mal')
     return render_template('login.html')
 
 @bp.route('/registro', methods=['GET', 'POST'])
 def registro():
     if request.method == 'POST':
-        usuario = request.form.get('usuario', '').strip()
-        contrasena = request.form.get('contrasena', '').strip()
-        if not usuario or not contrasena:
-            flash('Rellena todos los datos', 'error')
-            return render_template('registro.html')
-        conn, is_pg = get_conn()
+        usuario = request.form['usuario']
+        contrasena = request.form['contrasena']
+        conn, is_pg = get_db()
         cur = conn.cursor()
         try:
-            hashed = generate_password_hash(contrasena)
-            cur.execute(qmark_to_psycopg("INSERT INTO usuarios (usuario, contrasena) VALUES (?, ?)", is_pg), (usuario, hashed))
+            cur.execute(q("INSERT INTO usuarios (usuario, contrasena) VALUES (?, ?)", is_pg), (usuario, generate_password_hash(contrasena)))
             conn.commit()
-            flash('Usuario creado, ya puedes iniciar sesión', 'ok')
-            return redirect(url_for('rutas.login'))
-        except Exception as e:
+            return redirect(url_for('bp.login'))
+        except:
             conn.rollback()
-            flash('Ese usuario ya existe', 'error')
+            flash('Usuario ya existe')
         finally:
             cur.close()
             conn.close()
@@ -83,48 +86,37 @@ def registro():
 @bp.route('/nueva', methods=['GET', 'POST'])
 def nueva():
     if 'usuario_id' not in session:
-        return redirect(url_for('rutas.login'))
+        return redirect(url_for('bp.login'))
     if request.method == 'POST':
-        titulo = request.form.get('titulo', '').strip()
-        tipo = request.form.get('tipo', '').strip()
-        descripcion = request.form.get('descripcion', '').strip()
-        impacto = request.form.get('impacto', '').strip()
-        unidad = request.form.get('unidad', '').strip()
-        fecha = request.form.get('fecha') or str(date.today())
-        if not titulo or not descripcion:
-            flash('Rellena los datos del formulario', 'error')
-            return render_template('formulario.html')
-        conn, is_pg = get_conn()
+        conn, is_pg = get_db()
         cur = conn.cursor()
-        cur.execute(qmark_to_psycopg("INSERT INTO acciones (titulo, tipo, descripcion, fecha, impacto, unidad, usuario_id) VALUES (?, ?, ?, ?, ?, ?, ?)", is_pg), (titulo, tipo, descripcion, fecha, impacto, unidad, session['usuario_id']))
+        cur.execute(q("INSERT INTO acciones (titulo, tipo, descripcion, fecha, impacto, unidad, usuario_id) VALUES (?, ?, ?, ?, ?, ?, ?)", is_pg), (request.form['titulo'], request.form['tipo'], request.form['descripcion'], request.form['fecha'], request.form['impacto'], request.form['unidad'], session['usuario_id']))
         conn.commit()
         cur.close()
         conn.close()
-        flash('Acción guardada', 'ok')
-        return redirect(url_for('rutas.index'))
+        return redirect(url_for('bp.index'))
     return render_template('formulario.html')
 
 @bp.route('/logout')
 def logout():
     session.clear()
-    return redirect(url_for('rutas.login'))
+    return redirect(url_for('bp.login'))
 
-# Deja tus rutas de editar, eliminar y detalle igual pero usando get_conn() y qmark_to_psycopg
 @bp.route('/eliminar/<int:id>', methods=['POST'])
 def eliminar(id):
-    conn, is_pg = get_conn()
+    conn, is_pg = get_db()
     cur = conn.cursor()
-    cur.execute(qmark_to_psycopg("DELETE FROM acciones WHERE id = ? AND usuario_id = ?", is_pg), (id, session['usuario_id']))
+    cur.execute(q("DELETE FROM acciones WHERE id = ? AND usuario_id = ?", is_pg), (id, session['usuario_id']))
     conn.commit()
     cur.close()
     conn.close()
-    return redirect(url_for('rutas.index'))
+    return redirect(url_for('bp.index'))
 
 @bp.route('/detalle/<int:id>')
 def detalle(id):
-    conn, is_pg = get_conn()
+    conn, is_pg = get_db()
     cur = conn.cursor()
-    cur.execute(qmark_to_psycopg("SELECT * FROM acciones WHERE id = ? AND usuario_id = ?", is_pg), (id, session['usuario_id']))
+    cur.execute(q("SELECT * FROM acciones WHERE id = ? AND usuario_id = ?", is_pg), (id, session['usuario_id']))
     accion = cur.fetchone()
     cur.close()
     conn.close()
