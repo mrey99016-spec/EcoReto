@@ -1,265 +1,131 @@
+import os
 import sqlite3
-from functools import wraps
-
-from flask import (
-    Blueprint, current_app, render_template, request,
-    redirect, url_for, session, flash
-)
+from flask import Blueprint, render_template, request, redirect, url_for, flash, session, current_app, g
 from werkzeug.security import generate_password_hash, check_password_hash
+from datetime import date
 
+bp = Blueprint('rutas', __name__)
 
-rutas = Blueprint("rutas", __name__)
+def get_conn():
+    db_url = os.environ.get('DATABASE_URL')
+    if db_url:
+        import psycopg2
+        conn = psycopg2.connect(db_url)
+        conn.autocommit = False
+        return conn, True  # True = es postgres
+    else:
+        conn = sqlite3.connect('app/eco_reto.db')
+        conn.row_factory = sqlite3.Row
+        return conn, False
 
+def qmark_to_psycopg(query, is_pg):
+    if is_pg:
+        return query.replace('?', '%s')
+    return query
 
-def conectar_db():
-    conexion = sqlite3.connect(current_app.config["DATABASE"])
-    conexion.row_factory = sqlite3.Row
-    return conexion
+@bp.route('/')
+def index():
+    if 'usuario_id' not in session:
+        return redirect(url_for('rutas.login'))
+    conn, is_pg = get_conn()
+    cur = conn.cursor()
+    if is_pg:
+        cur.execute("SELECT * FROM acciones WHERE usuario_id = %s ORDER BY fecha DESC", (session['usuario_id'],))
+    else:
+        cur.execute("SELECT * FROM acciones WHERE usuario_id = ? ORDER BY fecha DESC", (session['usuario_id'],))
+    acciones = cur.fetchall()
+    cur.close()
+    conn.close()
+    return render_template('index.html', acciones=acciones)
 
+@bp.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        usuario = request.form.get('usuario', '').strip()
+        contrasena = request.form.get('contrasena', '').strip()
+        conn, is_pg = get_conn()
+        cur = conn.cursor()
+        cur.execute(qmark_to_psycopg("SELECT * FROM usuarios WHERE usuario = ?", is_pg), (usuario,))
+        user = cur.fetchone()
+        cur.close()
+        conn.close()
+        if user and check_password_hash(user[2] if not is_pg else user[2], contrasena):
+            session['usuario_id'] = user[0] if not is_pg else user[0]
+            session['usuario'] = usuario
+            return redirect(url_for('rutas.index'))
+        flash('Usuario o contraseña incorrectos', 'error')
+    return render_template('login.html')
 
-def iniciar_sesion_requerido(funcion):
-    @wraps(funcion)
-    def comprobar(*args, **kwargs):
-        if "usuario_id" not in session:
-            return redirect(url_for("rutas.inicio"))
-        return funcion(*args, **kwargs)
-    return comprobar
-
-
-@rutas.route("/", methods=["GET", "POST"])
-def inicio():
-    if request.method == "POST":
-        usuario = request.form.get("usuario", "").strip()
-        contrasena = request.form.get("contrasena", "")
-
-        with conectar_db() as db:
-            cuenta = db.execute(
-                "SELECT * FROM usuarios WHERE usuario = ?",
-                (usuario,)
-            ).fetchone()
-
-        if cuenta and check_password_hash(
-            cuenta["contrasena"], contrasena
-        ):
-            session.clear()
-            session["usuario_id"] = cuenta["id"]
-            session["usuario"] = cuenta["usuario"]
-            return redirect(url_for("rutas.inicio"))
-
-        flash("Usuario o contraseña incorrectos.", "error")
-
-    if "usuario_id" in session:
-        with conectar_db() as db:
-            acciones = db.execute("""
-                SELECT * FROM acciones
-                WHERE usuario_id = ?
-                ORDER BY fecha DESC, id DESC
-            """, (session["usuario_id"],)).fetchall()
-
-        litros = sum(
-            a["impacto"] for a in acciones
-            if a["unidad"] == "litros"
-        )
-        kilos = sum(
-            a["impacto"] for a in acciones
-            if a["unidad"] == "kg"
-        )
-        kwh = sum(
-            a["impacto"] for a in acciones
-            if a["unidad"] == "kWh"
-        )
-
-        return render_template(
-            "index.html",
-            acciones=acciones,
-            total=len(acciones),
-            litros=litros,
-            kilos=kilos,
-            kwh=kwh
-        )
-
-    return render_template(
-        "index.html",
-        registro=request.args.get("registro") == "1"
-    )
-
-
-@rutas.route("/registro", methods=["POST"])
+@bp.route('/registro', methods=['GET', 'POST'])
 def registro():
-    usuario = request.form.get("usuario", "").strip()
-    contrasena = request.form.get("contrasena", "")
+    if request.method == 'POST':
+        usuario = request.form.get('usuario', '').strip()
+        contrasena = request.form.get('contrasena', '').strip()
+        if not usuario or not contrasena:
+            flash('Rellena todos los datos', 'error')
+            return render_template('registro.html')
+        conn, is_pg = get_conn()
+        cur = conn.cursor()
+        try:
+            hashed = generate_password_hash(contrasena)
+            cur.execute(qmark_to_psycopg("INSERT INTO usuarios (usuario, contrasena) VALUES (?, ?)", is_pg), (usuario, hashed))
+            conn.commit()
+            flash('Usuario creado, ya puedes iniciar sesión', 'ok')
+            return redirect(url_for('rutas.login'))
+        except Exception as e:
+            conn.rollback()
+            flash('Ese usuario ya existe', 'error')
+        finally:
+            cur.close()
+            conn.close()
+    return render_template('registro.html')
 
-    if len(usuario) < 3 or len(contrasena) < 6:
-        flash(
-            "Usa un usuario de al menos 3 caracteres "
-            "y una contraseña de al menos 6.",
-            "error"
-        )
-        return redirect(url_for("rutas.inicio", registro=1))
-
-    try:
-        with conectar_db() as db:
-            db.execute("""
-                INSERT INTO usuarios (usuario, contrasena)
-                VALUES (?, ?)
-            """, (
-                usuario,
-                generate_password_hash(contrasena)
-            ))
-        flash("Cuenta creada. Ya puedes iniciar sesión.", "ok")
-        return redirect(url_for("rutas.inicio"))
-
-    except sqlite3.IntegrityError:
-        flash("Ese usuario ya existe.", "error")
-        return redirect(url_for("rutas.inicio", registro=1))
-
-
-@rutas.route("/salir")
-def salir():
-    session.clear()
-    return redirect(url_for("rutas.inicio"))
-
-
-@rutas.route("/nueva", methods=["GET", "POST"])
-@iniciar_sesion_requerido
+@bp.route('/nueva', methods=['GET', 'POST'])
 def nueva():
-    if request.method == "POST":
-        tipo = request.form.get("tipo", "").strip()
-        descripcion = request.form.get("descripcion", "").strip()
-        fecha = request.form.get("fecha", "").strip()
-        unidad = request.form.get("unidad", "").strip()
+    if 'usuario_id' not in session:
+        return redirect(url_for('rutas.login'))
+    if request.method == 'POST':
+        titulo = request.form.get('titulo', '').strip()
+        tipo = request.form.get('tipo', '').strip()
+        descripcion = request.form.get('descripcion', '').strip()
+        impacto = request.form.get('impacto', '').strip()
+        unidad = request.form.get('unidad', '').strip()
+        fecha = request.form.get('fecha') or str(date.today())
+        if not titulo or not descripcion:
+            flash('Rellena los datos del formulario', 'error')
+            return render_template('formulario.html')
+        conn, is_pg = get_conn()
+        cur = conn.cursor()
+        cur.execute(qmark_to_psycopg("INSERT INTO acciones (titulo, tipo, descripcion, fecha, impacto, unidad, usuario_id) VALUES (?, ?, ?, ?, ?, ?, ?)", is_pg), (titulo, tipo, descripcion, fecha, impacto, unidad, session['usuario_id']))
+        conn.commit()
+        cur.close()
+        conn.close()
+        flash('Acción guardada', 'ok')
+        return redirect(url_for('rutas.index'))
+    return render_template('formulario.html')
 
-        try:
-            impacto = float(request.form.get("impacto", ""))
-        except ValueError:
-            impacto = -1
+@bp.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('rutas.login'))
 
-        tipos = [
-            "Reciclaje", "Ahorro de agua",
-            "Transporte", "Energía", "Otro"
-        ]
-
-        if (
-            tipo not in tipos
-            or not descripcion
-            or len(descripcion) > 250
-            or not fecha
-            or unidad not in ["kg", "litros", "kWh", "unidades"]
-            or impacto < 0
-            or impacto > 1000000
-        ):
-            flash("Revisa los datos del formulario.", "error")
-            return render_template(
-                "formulario.html",
-                accion=None,
-                hoy=__import__("datetime").date.today().isoformat()
-            )
-
-        with conectar_db() as db:
-            db.execute("""
-                INSERT INTO acciones
-                (usuario_id, tipo, descripcion, fecha, impacto, unidad)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (
-                session["usuario_id"], tipo, descripcion,
-                fecha, impacto, unidad
-            ))
-
-        flash("¡Acción ecológica guardada!", "ok")
-        return redirect(url_for("rutas.inicio"))
-
-    from datetime import date
-    return render_template(
-        "formulario.html",
-        accion=None,
-        hoy=date.today().isoformat()
-    )
-
-
-@rutas.route("/editar/<int:id>", methods=["GET", "POST"])
-@iniciar_sesion_requerido
-def editar(id):
-    with conectar_db() as db:
-        accion = db.execute("""
-            SELECT * FROM acciones
-            WHERE id = ? AND usuario_id = ?
-        """, (id, session["usuario_id"])).fetchone()
-
-    if accion is None:
-        flash("No se encontró esa acción.", "error")
-        return redirect(url_for("rutas.inicio"))
-
-    if request.method == "POST":
-        tipo = request.form.get("tipo", "").strip()
-        descripcion = request.form.get("descripcion", "").strip()
-        fecha = request.form.get("fecha", "").strip()
-        unidad = request.form.get("unidad", "").strip()
-
-        try:
-            impacto = float(request.form.get("impacto", ""))
-        except ValueError:
-            impacto = -1
-
-        if (
-            tipo not in [
-                "Reciclaje", "Ahorro de agua",
-                "Transporte", "Energía", "Otro"
-            ]
-            or not descripcion
-            or len(descripcion) > 250
-            or not fecha
-            or unidad not in ["kg", "litros", "kWh", "unidades"]
-            or impacto < 0
-            or impacto > 1000000
-        ):
-            flash("Revisa los datos del formulario.", "error")
-            return render_template(
-                "formulario.html", accion=accion, hoy=accion["fecha"]
-            )
-
-        with conectar_db() as db:
-            db.execute("""
-                UPDATE acciones
-                SET tipo = ?, descripcion = ?, fecha = ?,
-                    impacto = ?, unidad = ?
-                WHERE id = ? AND usuario_id = ?
-            """, (
-                tipo, descripcion, fecha, impacto, unidad,
-                id, session["usuario_id"]
-            ))
-
-        flash("Acción actualizada correctamente.", "ok")
-        return redirect(url_for("rutas.inicio"))
-
-    return render_template(
-        "formulario.html", accion=accion, hoy=accion["fecha"]
-    )
-
-
-@rutas.route("/eliminar/<int:id>", methods=["POST"])
-@iniciar_sesion_requerido
+# Deja tus rutas de editar, eliminar y detalle igual pero usando get_conn() y qmark_to_psycopg
+@bp.route('/eliminar/<int:id>', methods=['POST'])
 def eliminar(id):
-    with conectar_db() as db:
-        db.execute("""
-            DELETE FROM acciones
-            WHERE id = ? AND usuario_id = ?
-        """, (id, session["usuario_id"]))
+    conn, is_pg = get_conn()
+    cur = conn.cursor()
+    cur.execute(qmark_to_psycopg("DELETE FROM acciones WHERE id = ? AND usuario_id = ?", is_pg), (id, session['usuario_id']))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return redirect(url_for('rutas.index'))
 
-    flash("Acción eliminada.", "ok")
-    return redirect(url_for("rutas.inicio"))
-
-
-@rutas.route("/detalle/<int:id>")
-@iniciar_sesion_requerido
+@bp.route('/detalle/<int:id>')
 def detalle(id):
-    with conectar_db() as db:
-        accion = db.execute("""
-            SELECT * FROM acciones
-            WHERE id = ? AND usuario_id = ?
-        """, (id, session["usuario_id"])).fetchone()
-
-    if accion is None:
-        flash("No se encontró esa acción.", "error")
-        return redirect(url_for("rutas.inicio"))
-
-    return render_template("detalle.html", accion=accion)
+    conn, is_pg = get_conn()
+    cur = conn.cursor()
+    cur.execute(qmark_to_psycopg("SELECT * FROM acciones WHERE id = ? AND usuario_id = ?", is_pg), (id, session['usuario_id']))
+    accion = cur.fetchone()
+    cur.close()
+    conn.close()
+    return render_template('detalle.html', accion=accion)
