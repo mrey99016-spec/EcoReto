@@ -11,23 +11,25 @@ def create_app():
     db_url = os.getenv("DATABASE_URL")
 
     if db_url:
-        import psycopg2
-        with psycopg2.connect(db_url) as conexion:
-            cur = conexion.cursor()
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS acciones (
-                    id SERIAL PRIMARY KEY,
-                    titulo TEXT NOT NULL,
-                    categoria TEXT NOT NULL,
-                    descripcion TEXT NOT NULL,
-                    propuesta_por TEXT
-                );
-            """)
-            conexion.commit()
+        try:
+            import psycopg2
+            with psycopg2.connect(db_url) as conexion:
+                cur = conexion.cursor()
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS acciones (
+                        id SERIAL PRIMARY KEY,
+                        titulo TEXT NOT NULL,
+                        categoria TEXT NOT NULL,
+                        descripcion TEXT NOT NULL,
+                        propuesta_por TEXT
+                    );
+                """)
+                conexion.commit()
+        except Exception as e:
+            print(f"Error conectando a Neon: {e}")
     else:
         with sqlite3.connect(app.config['DATABASE']) as conexion:
-            conexion.execute("CREATE TABLE IF NOT EXISTS usuarios (id INTEGER PRIMARY KEY AUTOINCREMENT, usuario TEXT NOT NULL, contrasena TEXT NOT NULL);")
-            conexion.execute("CREATE TABLE IF NOT EXISTS acciones (id INTEGER PRIMARY KEY AUTOINCREMENT, usuario_id INTEGER NOT NULL, titulo TEXT NOT NULL, descripcion TEXT NOT NULL, impacto REAL NOT NULL, fecha TEXT NOT NULL, unidad TEXT NOT NULL);")
+            conexion.execute("CREATE TABLE IF NOT EXISTS acciones (id INTEGER PRIMARY KEY AUTOINCREMENT, titulo TEXT, categoria TEXT, descripcion TEXT, propuesta_por TEXT);")
             conexion.commit()
 
     from app.routes import rutas
